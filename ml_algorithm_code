@@ -1,0 +1,164 @@
+setwd("G:/My Drive/Research Supervision II/Stephen Evans/work/data/source")
+
+data<-read.table(file='ldvas_for_catboost_fscores.csv', header=TRUE, sep=',')
+
+library(doParallel)
+library(caret)
+library(xgboost)
+library(DMwR2)
+library(ROCR)
+library(qpcR)
+library(SuperLearner)
+library(kernlab)
+library(parallel)
+library(e1071)
+library(nnet)
+library(class)
+library(glmnet)
+library(RhpcBLASctl)
+library(arm)
+library(ranger)
+library(smotefamily)
+library(gbm)
+library(ridge)
+library(rgl)
+library(party)
+library(lda)
+library(biglasso)
+library(LogicReg)
+
+(num_cores = RhpcBLASctl::get_num_cores())
+options(mc.cores = 10)
+
+
+#cluster = parallel::makeCluster(9)
+
+
+
+n.iters=500
+
+
+#define empty vectors
+auc_sl <- vector(mode="numeric", length=n.iters)
+ppv_sl <- vector(mode="numeric", length=n.iters)
+npv_sl <- vector(mode="numeric", length=n.iters)
+sens_sl <- vector(mode="numeric", length=n.iters)
+spec_sl <- vector(mode="numeric", length=n.iters)
+acc_sl <- vector(mode="numeric", length=n.iters)
+
+
+
+for(j in 1:n.iters){
+  print(paste0("run number=", j))
+  seed=j^2
+  # seed=as.numeric(Sys.time())
+  set.seed(seed, "L'Ecuyer-CMRG")
+  
+  intrain <- createDataPartition(data$care_bin, p=0.75, list = FALSE)
+  
+  #smp_size <- floor(0.75 * nrow(data))
+  #intrain <- sample(seq_len(nrow(data)), size = smp_size)
+  data_train <- data[intrain, ]
+  data_test <- data[-intrain, ]
+  
+  y<-as.numeric(data_train$care_bin)
+  
+  len<-length(y)
+  total<-sum(y)
+  
+  a<-total
+  b<-len-total
+  c<-a/len
+  d<-b/len
+  
+  #create vector of weights
+  class_weights<-data_train[,6]
+  class_weights<-replace(class_weights, class_weights==0, c)
+  class_weights<-replace(class_weights, class_weights==1, d)
+  
+  
+  SL.model <- SuperLearner(Y=y,
+                           X=data_train[,-c(6)],
+                           family=binomial(),
+                           method=method.AUC, obsWeights = class_weights,
+                           SL.library=list("SL.glm","SL.cforest","SL.biglasso","SL.rpart","SL.mean", "SL.ksvm", "SL.xgboost","SL.ranger","SL.nnet","SL.gbm"))
+  
+  
+  y_pred_sl_p<-predict(SL.model, data_test[,-c(6)], onlySL = T)
+  
+  y_pred_sl_p<-as.numeric(y_pred_sl_p$pred)
+  
+  y_pred_sl_class<- ifelse( y_pred_sl_p> 0.5, 1, 0)
+  
+  misClasificError <- mean(y_pred_sl_class != data_test[,6])
+  
+  # auc_SL[j]<-auc(roc(data_test$care_bin, as.numeric(y_pred_sl_class)))
+  
+  # making confusion matrix
+  
+  cm_rf<- table(data_test[,6], y_pred_sl_class)
+  cm_rf
+  
+  
+  # Predictive Accuracy
+  
+  print(paste('Accuracy', 1-misClasificError))
+  
+  
+  #AUC
+  library(ROCR)
+  
+  p <- predict(SL.model, newdata = data_test[,-6],onlySL = T)
+  p<-p$pred
+  pr <- prediction(as.numeric(p), data_test[,6])
+  prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+  
+  auc_sl_t <- performance(pr, measure = "auc")
+  auc_sl_t <- auc_sl_t@y.values[[1]]
+  auc_sl[j] <- auc_sl_t
+  
+  
+  print(paste('AUC', auc_sl_t))
+  aucDF<-as.data.frame(auc_sl)
+  mean_auc=mean(aucDF[1:j,1])
+  print(paste('Moving average AUC', mean_auc))
+  
+  
+  cm_sl = table(data_test[,6], y_pred_sl_class)
+  cm_sl = table(data_test[,6], y_pred_sl_class)
+  acc_sl = ((cm_sl[1,1]+ cm_sl [2,2])/ (cm_sl[1,1]+ cm_sl[1,2]+ cm_sl[2,1]+ cm_sl[2,2]))
+  y_pred_sl_fac = as.factor(y_pred_sl_class)
+  data_test_fac<-as.factor(data_test[,6])
+  sens_sl[j] = sensitivity(data_test_fac, y_pred_sl_fac)
+  spec_sl[j] = specificity(data_test_fac, y_pred_sl_fac)
+  ppv_sl[j] = posPredValue(data_test_fac, y_pred_sl_fac)
+  npv_sl[j] = negPredValue(data_test_fac, y_pred_sl_fac)
+  acc_sl[j] = ((cm_sl[1,1]+ cm_sl [2,2])/ (cm_sl[1,1]+ cm_sl[1,2]+ cm_sl[2,1]+ cm_sl[2,2]))
+}
+
+mean_auc_sl <- mean(auc_sl)
+mean_acc_sl<-mean(acc_sl)
+mean_sens_sl<-mean(sens_sl)
+mean_spec_sl<-mean(spec_sl)
+mean_ppv_sl<-mean(ppv_sl)
+mean_npv_sl<-mean(npv_sl)
+mean_acc_sl<-mean(acc_sl)
+library(qpcR)
+
+
+#note: accuracy not working properly!
+slDF <- qpcR:::cbind.na(auc_sl, acc_sl, ppv_sl, npv_sl, sens_sl, spec_sl, mean_auc_sl)
+
+
+
+
+write.csv(slDF, "G:/My Drive/Research Supervision II/Stephen Evans/work/data/derived/Superlearner_output.csv")
+
+mean_auc=mean(slDF[,1])
+print(paste ('mean AUC',   mean_auc_sl))
+print(paste ('mean Sens',   mean_sens_sl))
+print(paste ('mean Spec',   mean_spec_sl))
+print(paste ('mean PPV',   mean_ppv_sl))
+print(paste ('mean NPV',   mean_npv_sl))
+print(paste ('mean Accuracy',   mean_acc_sl))
+SL.model
